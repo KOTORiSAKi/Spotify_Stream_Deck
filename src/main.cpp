@@ -143,6 +143,25 @@ void spotifyWorkerTask(void *pvParameters)
                 SpotifyTrack freshTrack;
                 if (spotify.getCurrentlyPlaying(freshTrack) == 1)
                 {
+                    // Fetch color outside the mutex lock
+                    String currentUrl = "";
+                    uint32_t currentColor = 0;
+                    if (xSemaphoreTake(trackMutex, pdMS_TO_TICKS(10)))
+                    {
+                        currentUrl = currentTrack.albumArtUrl;
+                        currentColor = currentTrack.albumColor;
+                        xSemaphoreGive(trackMutex);
+                    }
+
+                    if (freshTrack.albumArtUrl != currentUrl && freshTrack.albumArtUrl.length() > 0)
+                    {
+                        freshTrack.albumColor = spotify.getAverageAlbumColor(freshTrack.albumArtUrl);
+                    }
+                    else
+                    {
+                        freshTrack.albumColor = currentColor;
+                    }
+
                     if (xSemaphoreTake(trackMutex, pdMS_TO_TICKS(100)) == pdTRUE)
                     {
                         currentTrack = freshTrack;
@@ -166,6 +185,25 @@ void spotifyWorkerTask(void *pvParameters)
 
             if (status == 1)
             {
+                // Fetch color outside the mutex lock
+                String currentUrl = "";
+                uint32_t currentColor = 0;
+                if (xSemaphoreTake(trackMutex, pdMS_TO_TICKS(10)))
+                {
+                    currentUrl = currentTrack.albumArtUrl;
+                    currentColor = currentTrack.albumColor;
+                    xSemaphoreGive(trackMutex);
+                }
+
+                if (freshTrack.albumArtUrl != currentUrl && freshTrack.albumArtUrl.length() > 0)
+                {
+                    freshTrack.albumColor = spotify.getAverageAlbumColor(freshTrack.albumArtUrl);
+                }
+                else
+                {
+                    freshTrack.albumColor = currentColor;
+                }
+
                 if (xSemaphoreTake(trackMutex, pdMS_TO_TICKS(100)) == pdTRUE)
                 {
                     currentTrack = freshTrack;
@@ -225,11 +263,16 @@ void setup()
     if (WiFi.status() == WL_CONNECTED && WiFi.localIP() != IPAddress(0, 0, 0, 0))
     {
         Serial.println("[Setup] Authenticating with Spotify API...");
+        yield();
         if (spotify.begin())
         {
             spotifyInitialized = true;
             Serial.println("[Setup] Spotify authentication successful! Fetching initial state...");
+            yield();
             spotify.getCurrentlyPlaying(currentTrack);
+            yield();
+            currentTrack.albumColor = spotify.getAverageAlbumColor(currentTrack.albumArtUrl);
+            yield();
             hardware.setMotorRunning(currentTrack.isPlaying);
             hardware.updateDisplay(currentTrack);
         }

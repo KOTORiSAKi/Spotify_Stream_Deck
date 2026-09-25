@@ -23,8 +23,8 @@
 #define PIN_ENCODER_B 26
 
 // 6. WS2812B RGB LED
-#define PIN_NEOPIXEL 13 // Changed from 15 to 13 (Safe Output, avoids MTDO conflict)
-#define NUM_LEDS 15     // Number of LEDs in strip
+#define PIN_NEOPIXEL 2 // Changed from 15 to 13 (Safe Output, avoids MTDO conflict)
+#define NUM_LEDS 12    // Number of LEDs in strip
 
 // 7. MAX98357A I2S Audio DAC
 #define PIN_I2S_LRC 27  // LR Clock / Word Select (WS)

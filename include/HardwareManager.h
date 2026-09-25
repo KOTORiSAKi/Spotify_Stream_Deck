@@ -32,8 +32,9 @@ public:
     // Callbacks / status updates
     void updateDisplay(const SpotifyTrack &track, const char *statusMsg = nullptr);
     void drawVolumeOverlay(int volumePercent, float distanceCm);
-    void setNeoPixelStatus(bool isPlaying, bool isConnected);
+    void setNeoPixelStatus(bool isPlaying, bool isConnected, uint32_t trackColor = 0, bool isScrubbing = false);
     void showNeoPixelVolume(int volumePercent);
+    void drawScrubOverlay(long offsetSeconds);
 
     // Motor control
     void setMotorRunning(bool run);
@@ -80,6 +81,7 @@ private:
     // Display update throttle
     unsigned long _lastDisplayUpdate = 0;
     unsigned long _lastLedUpdate = 0;
+    float _ledVirtualPosition = 0;
 
     // Marquee scrolling states
     String _lastTrackTitle = "";

@@ -14,6 +14,7 @@ struct SpotifyTrack
     String album;            // Album title
     String trackUri;         // Spotify track URI
     String albumArtUrl;      // Smallest/Thumbnail album artwork URL
+    uint32_t albumColor = 0; // Average color of the album art (0xRRGGBB)
     uint32_t progressMs = 0; // Current playback position in ms
     uint32_t durationMs = 0; // Total track duration in ms
 };
@@ -54,6 +55,9 @@ public:
     //  0 : Nothing playing / player idle (HTTP 204)
     // -1 : Network or API error
     int getCurrentlyPlaying(SpotifyTrack &track);
+
+    // Download and extract average color from album art URL
+    uint32_t getAverageAlbumColor(const String &url);
 
     // Playback control functions
     bool play();

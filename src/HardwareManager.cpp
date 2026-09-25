@@ -118,7 +118,7 @@ void HardwareManager::setMotorRunning(bool run)
 {
     if (run && !_isScrubbing)
     {
-        ledcWrite(MOTOR_PWM_CHANNEL, 130); // ~50% duty cycle for turntable rotation
+        ledcWrite(MOTOR_PWM_CHANNEL, 128); // ~30% duty cycle for turntable rotation
     }
     else
     {
@@ -210,10 +210,12 @@ void HardwareManager::showNeoPixelVolume(int volumePercent)
     _strip.show();
 }
 
-void HardwareManager::setNeoPixelStatus(bool isPlaying, bool isConnected)
+void HardwareManager::setNeoPixelStatus(bool isPlaying, bool isConnected, uint32_t trackColor, bool isScrubbing)
 {
     if (_volumeAdjusting)
         return; // Prioritize volume display
+
+    static float current_r = 0, current_g = 0, current_b = 0;
 
     static uint8_t breath = 50;
     static int8_t dir = 2;
@@ -230,34 +232,59 @@ void HardwareManager::setNeoPixelStatus(bool isPlaying, bool isConnected)
             _strip.setPixelColor(i, _strip.Color(0, 0, breath));
         }
     }
-    else if (isPlaying)
-    {
-        // Spotify Green rotating dot / breathing
-        static int dotPos = 0;
-        static unsigned long lastDotMove = 0;
-        if (millis() - lastDotMove > 80)
-        {
-            lastDotMove = millis();
-            dotPos = (dotPos + 1) % NUM_LEDS;
-        }
-        for (int i = 0; i < NUM_LEDS; i++)
-        {
-            if (i == dotPos)
-            {
-                _strip.setPixelColor(i, _strip.Color(30, 255, 80));
-            }
-            else
-            {
-                _strip.setPixelColor(i, _strip.Color(5, 40, 10));
-            }
-        }
-    }
     else
     {
-        // Amber/Orange when paused
-        for (int i = 0; i < NUM_LEDS; i++)
+        // Extract Target Color
+        uint8_t target_r = (trackColor >> 16) & 0xFF;
+        uint8_t target_g = (trackColor >> 8) & 0xFF;
+        uint8_t target_b = trackColor & 0xFF;
+        if (target_r == 0 && target_g == 0 && target_b == 0)
+        { // Fallback if color extraction fails
+            target_r = 30;
+            target_g = 255;
+            target_b = 80; // Spotify green
+        }
+
+        // Smooth Color Crossfade (Fade-in / Fade-out) via Exponential Moving Average
+        const float alpha = 0.08f; // ~1.5 seconds to complete fade
+        current_r += alpha * (target_r - current_r);
+        current_g += alpha * (target_g - current_g);
+        current_b += alpha * (target_b - current_b);
+
+        uint8_t r = (uint8_t)current_r;
+        uint8_t g = (uint8_t)current_g;
+        uint8_t b = (uint8_t)current_b;
+
+        if (isPlaying || isScrubbing)
         {
-            _strip.setPixelColor(i, _strip.Color(80, 40, 0));
+            // The position is now controlled externally by _ledVirtualPosition
+            int dotPos = ((int)_ledVirtualPosition) % NUM_LEDS;
+            if (dotPos < 0)
+                dotPos += NUM_LEDS; // Handle negative wrapping properly
+
+            for (int i = 0; i < NUM_LEDS; i++)
+            {
+                if (i == dotPos)
+                {
+                    _strip.setPixelColor(i, _strip.Color(r, g, b));
+                }
+                else
+                {
+                    // Dimmer version for background
+                    _strip.setPixelColor(i, _strip.Color(r / 6, g / 6, b / 6));
+                }
+            }
+        }
+        else
+        {
+            // Dimmed version of the album color when paused
+            r /= 3;
+            g /= 3;
+            b /= 3; // Dim for paused state
+            for (int i = 0; i < NUM_LEDS; i++)
+            {
+                _strip.setPixelColor(i, _strip.Color(r, g, b));
+            }
         }
     }
     _strip.show();
@@ -399,6 +426,35 @@ void HardwareManager::drawVolumeOverlay(int volumePercent, float distanceCm)
     _display.display();
 }
 
+void HardwareManager::drawScrubOverlay(long offsetSeconds)
+{
+    _display.clearDisplay();
+    _display.setTextWrap(false);
+
+    // Top Header
+    _display.setTextSize(1);
+    _display.setTextColor(SSD1306_WHITE);
+    _display.setCursor(18, 0);
+    _display.println("TURNTABLE SCRUB");
+    _display.drawLine(0, 10, 128, 10, SSD1306_WHITE);
+
+    // Big Offset Number in center
+    _display.setTextSize(2);
+    String offsetStr = (offsetSeconds > 0 ? "+" : "") + String(offsetSeconds) + " sec";
+    int textX = 64 - (offsetStr.length() * 6); // Center text roughly
+    if (offsetSeconds == 0)
+        offsetStr = "0 sec";
+    _display.setCursor(textX, 24);
+    _display.print(offsetStr);
+
+    // Prompt
+    _display.setTextSize(1);
+    _display.setCursor(14, 52);
+    _display.print("Release to seek...");
+
+    _display.display();
+}
+
 void HardwareManager::_postCommand(SpotifyCmdType type, int32_t value)
 {
     if (_commandQueue != NULL)
@@ -449,38 +505,95 @@ void HardwareManager::update(SpotifyTrack &currentTrack)
     }
 
     // 2. Turntable Scrubbing (Rotary Encoder + Motor + I2S Scratch SFX)
-    long encoderDiff = _encoderCount - _lastProcessedEncoder;
-    if (encoderDiff != 0)
+    long currentEncoderFast = _encoderCount;
+    long deltaFast = currentEncoderFast - _lastProcessedEncoder;
+
+    bool motorShouldBeRunning = currentTrack.isPlaying && !_isScrubbing;
+
+    if (deltaFast != 0)
     {
-        _lastProcessedEncoder = _encoderCount;
+        _lastProcessedEncoder = currentEncoderFast;
 
-        if (!_isScrubbing)
+        // If motor is OFF (or we are already scrubbing), any movement is a user scratch!
+        if (!motorShouldBeRunning || _isScrubbing)
         {
-            _isScrubbing = true;
-            _wasPlayingBeforeScrub = currentTrack.isPlaying;
-            Serial.println("[Turntable] Manual rotation detected -> Pausing Spotify & Cutting Motor PWM");
-            setMotorRunning(false); // Stop motor immediately (stall protection)
-            if (_wasPlayingBeforeScrub)
+            if (!_isScrubbing)
             {
-                _postCommand(CMD_PAUSE); // Pause Spotify playback while touching/scrubbing
+                _isScrubbing = true;
+                _wasPlayingBeforeScrub = currentTrack.isPlaying;
+                setMotorRunning(false); // Ensure motor is off
+                if (_wasPlayingBeforeScrub)
+                {
+                    _postCommand(CMD_PAUSE);
+                }
+                _scrubAccumulatedMs = 0;
+                Serial.println("[Turntable] User started scrubbing!");
             }
-            _scrubAccumulatedMs = 0;
+
+            _lastScrubTime = now;
+            SoundEffects::playVinylScratch((int)deltaFast);
+            _scrubAccumulatedMs += deltaFast;
+
+            // Move the NeoPixel dot manually
+            _ledVirtualPosition += deltaFast * 0.4f;
+
+            Serial.printf("[Turntable] Scratching: delta=%ld, accumulated=%ld\n", deltaFast, _scrubAccumulatedMs);
         }
+    }
 
-        _lastScrubTime = now;
-        // Play synthetic vinyl scratch sound on I2S
-        SoundEffects::playVinylScratch((int)encoderDiff);
+    // 2.5 Motor Stall/Grab Detection (Checks every 100ms)
+    static unsigned long _lastStallCheck = 0;
+    static unsigned long _motorStartTime = 0;
+    static long _lastEncoderForStall = 0;
 
-        // Accumulate seek position (approx 600 ms per encoder tick)
-        _scrubAccumulatedMs += (encoderDiff * 600);
-        Serial.printf("[Turntable] Scratching: delta=%ld, accumulated offset=%ld ms\n", encoderDiff, _scrubAccumulatedMs);
+    if (now - _lastStallCheck >= 100)
+    {
+        _lastStallCheck = now;
+        long deltaSlow = currentEncoderFast - _lastEncoderForStall;
+        _lastEncoderForStall = currentEncoderFast;
+
+        if (motorShouldBeRunning)
+        {
+            if (_motorStartTime == 0)
+            {
+                _motorStartTime = now;
+            }
+
+            // Wait 1000ms for motor to overcome inertia and reach target speed
+            if (now - _motorStartTime > 1000)
+            {
+                // If the platter barely moves over 100ms (delta <= 1), the user has grabbed/stopped it!
+                if (abs(deltaSlow) <= 1)
+                {
+                    if (!_isScrubbing)
+                    {
+                        _isScrubbing = true;
+                        _wasPlayingBeforeScrub = true;
+                        Serial.println("[Turntable] Platter grabbed/stalled! Entering scrub mode.");
+                        setMotorRunning(false);
+                        _postCommand(CMD_PAUSE);
+                        _scrubAccumulatedMs = 0;
+                        _lastScrubTime = now;
+                    }
+                }
+            }
+        }
+        else
+        {
+            _motorStartTime = 0;
+        }
     }
 
     // If user finished scratching (no new encoder movements for 350 ms)
     if (_isScrubbing && (now - _lastScrubTime > 350))
     {
         _isScrubbing = false;
-        long targetMs = (long)currentTrack.progressMs + _scrubAccumulatedMs;
+
+        // Calculate seek offset based on accumulated ticks (e.g. 2 ticks = 1 second)
+        long offsetSeconds = _scrubAccumulatedMs / 2;
+        long offsetMs = offsetSeconds * 1000;
+
+        long targetMs = (long)currentTrack.progressMs + offsetMs;
         if (targetMs < 0)
             targetMs = 0;
         if (currentTrack.durationMs > 0 && targetMs > (long)currentTrack.durationMs)
@@ -488,9 +601,16 @@ void HardwareManager::update(SpotifyTrack &currentTrack)
             targetMs = currentTrack.durationMs;
         }
 
-        Serial.printf("[Turntable] Scrub complete! Queuing seek to %ld ms...\n", targetMs);
-        _postCommand(CMD_SEEK, (int32_t)targetMs);
-        currentTrack.progressMs = (uint32_t)targetMs;
+        if (offsetMs != 0)
+        {
+            Serial.printf("[Turntable] Scrub complete! Queuing seek to %ld ms...\n", targetMs);
+            _postCommand(CMD_SEEK, (int32_t)targetMs);
+            currentTrack.progressMs = (uint32_t)targetMs;
+        }
+        else
+        {
+            Serial.println("[Turntable] Scrub cancelled (not enough rotation).");
+        }
 
         if (_wasPlayingBeforeScrub)
         {
@@ -499,6 +619,7 @@ void HardwareManager::update(SpotifyTrack &currentTrack)
             setMotorRunning(true);
         }
         _scrubAccumulatedMs = 0;
+        updateDisplay(currentTrack); // Return to standard track screen immediately
     }
 
     // 3. Ultrasonic Distance (EMA Low-Pass Filter + Live OLED Screen + I2S Tone SFX)
@@ -547,7 +668,10 @@ void HardwareManager::update(SpotifyTrack &currentTrack)
             _lastVolumeChangeTime = now;
 
             // Live OLED Volume Overlay update smoothly at high frame rate!
-            drawVolumeOverlay(_targetVolume, _filteredDistance);
+            if (!_isScrubbing)
+            {
+                drawVolumeOverlay(_targetVolume, _filteredDistance);
+            }
 
             // Play acoustic feedback tone corresponding to volume level
             if (now - _lastVolumeToneTime > 120)
@@ -577,22 +701,43 @@ void HardwareManager::update(SpotifyTrack &currentTrack)
             Serial.printf("[Ultrasonic] Volume stabilized at %d%% -> Queuing CMD_SET_VOLUME (Fast 200ms)\n", _currentVolume);
             _postCommand(CMD_SET_VOLUME, _currentVolume);
         }
-        updateDisplay(currentTrack); // Return to standard track screen
+        if (!_isScrubbing)
+        {
+            updateDisplay(currentTrack); // Return to standard track screen
+        }
     }
 
-    // 4. Update LEDs and Display (when not in volume adjustment mode)
+    // 4. Update LEDs and Display (when not in volume/scrub adjustment mode)
     if (!_volumeAdjusting)
     {
+        // Update LEDs at a consistent 50ms interval (~20 FPS)
         if (now - _lastLedUpdate > 50)
         {
             _lastLedUpdate = now;
-            setNeoPixelStatus(currentTrack.isPlaying, WiFi.status() == WL_CONNECTED);
+
+            // If normally playing, let the dot spin forward automatically
+            if (currentTrack.isPlaying && !_isScrubbing)
+            {
+                _ledVirtualPosition += 0.55f; // Normal rotation speed
+            }
+
+            // Tell the NeoPixel logic to render the dot at _ledVirtualPosition!
+            setNeoPixelStatus(currentTrack.isPlaying, WiFi.status() == WL_CONNECTED, currentTrack.albumColor, _isScrubbing);
         }
 
+        // Update OLED Display
         if (now - _lastDisplayUpdate > 45) // ~22 FPS for smooth text marquee animation
         {
             _lastDisplayUpdate = now;
-            updateDisplay(currentTrack);
+            if (!_isScrubbing)
+            {
+                updateDisplay(currentTrack);
+            }
+            else
+            {
+                long offsetSeconds = _scrubAccumulatedMs / 2;
+                drawScrubOverlay(offsetSeconds);
+            }
         }
     }
 }

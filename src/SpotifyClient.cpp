@@ -356,3 +356,201 @@ bool SpotifyClient::seek(uint32_t positionMs)
     String endpoint = "seek?position_ms=" + String(positionMs);
     return _sendPlayerCommand(endpoint.c_str(), "PUT");
 }
+
+#include <JPEGDEC.h>
+
+struct ColorAccumulator
+{
+    uint32_t r = 0;
+    uint32_t g = 0;
+    uint32_t b = 0;
+    uint32_t count = 0;
+
+    uint32_t fallback_r = 0;
+    uint32_t fallback_g = 0;
+    uint32_t fallback_b = 0;
+    uint32_t fallback_count = 0;
+};
+
+static ColorAccumulator *g_acc = nullptr;
+
+int JPEGDrawCallback(JPEGDRAW *pDraw)
+{
+    if (!g_acc)
+        return 1;
+
+    int numPixels = pDraw->iWidth * pDraw->iHeight;
+    for (int i = 0; i < numPixels; i++)
+    {
+        uint16_t color = pDraw->pPixels[i];
+        uint8_t r = (color >> 11) << 3;
+        uint8_t g = ((color >> 5) & 0x3F) << 2;
+        uint8_t b = (color & 0x1F) << 3;
+
+        uint8_t maxC = r;
+        if (g > maxC)
+            maxC = g;
+        if (b > maxC)
+            maxC = b;
+
+        uint8_t minC = r;
+        if (g < minC)
+            minC = g;
+        if (b < minC)
+            minC = b;
+
+        // Is the pixel colorful? (difference between highest and lowest RGB channel is large enough)
+        bool isVibrant = (maxC - minC > 35) && (maxC > 50);
+
+        if (isVibrant)
+        {
+            g_acc->r += r;
+            g_acc->g += g;
+            g_acc->b += b;
+            g_acc->count++;
+        }
+
+        // Keep a fallback of non-dark pixels in case the album is totally grayscale
+        if (maxC > 40)
+        {
+            g_acc->fallback_r += r;
+            g_acc->fallback_g += g;
+            g_acc->fallback_b += b;
+            g_acc->fallback_count++;
+        }
+    }
+    return 1;
+}
+
+uint32_t SpotifyClient::getAverageAlbumColor(const String &url)
+{
+    if (url.length() == 0)
+        return 0xFFFFFF; // Default white
+
+    HTTPClient *http = new HTTPClient();
+    WiFiClientSecure *client = new WiFiClientSecure();
+
+    if (!http || !client)
+    {
+        if (http)
+            delete http;
+        if (client)
+            delete client;
+        return 0xFFFFFF;
+    }
+
+    client->setInsecure();
+
+    http->begin(*client, url);
+    int httpCode = http->GET();
+    uint32_t finalColor = 0xFFFFFF; // Default white
+
+    if (httpCode == HTTP_CODE_OK)
+    {
+        int len = http->getSize();
+        if (len > 0 && len < 40000)
+        { // Limit image size to 40KB
+            uint8_t *buffer = (uint8_t *)malloc(len);
+            if (buffer)
+            {
+                WiFiClient *stream = http->getStreamPtr();
+                if (stream)
+                {
+                    size_t bytesRead = 0;
+                    unsigned long startWait = millis();
+                    while (http->connected() && bytesRead < len)
+                    {
+                        size_t available = stream->available();
+                        if (available)
+                        {
+                            size_t toRead = len - bytesRead;
+                            if (available < toRead)
+                                toRead = available;
+                            int c = stream->readBytes(buffer + bytesRead, toRead);
+                            if (c > 0)
+                            {
+                                bytesRead += c;
+                                startWait = millis();
+                            }
+                        }
+                        else
+                        {
+                            if (millis() - startWait > 3000)
+                            {
+                                Serial.println("[Spotify] Image download timeout!");
+                                break;
+                            }
+                        }
+                        delay(1);
+                    }
+
+                    if (bytesRead > 0)
+                    {
+                        ColorAccumulator acc;
+                        g_acc = &acc;
+                        JPEGDEC *jpeg = new JPEGDEC();
+                        if (jpeg)
+                        {
+                            if (jpeg->openRAM(buffer, bytesRead, JPEGDrawCallback))
+                            {
+                                jpeg->setPixelType(RGB565_LITTLE_ENDIAN);
+                                jpeg->decode(0, 0, 0); // Decode entire image without scaling
+                            }
+                            delete jpeg;
+
+                            if (acc.count > 0)
+                            {
+                                uint8_t avgR = acc.r / acc.count;
+                                uint8_t avgG = acc.g / acc.count;
+                                uint8_t avgB = acc.b / acc.count;
+
+                                // Boost saturation/brightness to make the color pop on NeoPixels
+                                uint8_t aMax = avgR;
+                                if (avgG > aMax)
+                                    aMax = avgG;
+                                if (avgB > aMax)
+                                    aMax = avgB;
+
+                                if (aMax > 0 && aMax < 255)
+                                {
+                                    // Scale up so the brightest channel is close to 255
+                                    float scale = 255.0f / aMax;
+                                    // Soften the scale slightly so it's not overly blown out
+                                    scale = 1.0f + (scale - 1.0f) * 0.8f;
+                                    avgR = (uint8_t)(avgR * scale > 255 ? 255 : avgR * scale);
+                                    avgG = (uint8_t)(avgG * scale > 255 ? 255 : avgG * scale);
+                                    avgB = (uint8_t)(avgB * scale > 255 ? 255 : avgB * scale);
+                                }
+
+                                finalColor = ((uint32_t)avgR << 16) | ((uint32_t)avgG << 8) | avgB;
+                            }
+                            else if (acc.fallback_count > 0)
+                            {
+                                // If album is grayscale/black & white, fallback to just averaging bright pixels
+                                uint8_t avgR = acc.fallback_r / acc.fallback_count;
+                                uint8_t avgG = acc.fallback_g / acc.fallback_count;
+                                uint8_t avgB = acc.fallback_b / acc.fallback_count;
+                                finalColor = ((uint32_t)avgR << 16) | ((uint32_t)avgG << 8) | avgB;
+                            }
+                            else
+                            {
+                                finalColor = 0xFFFFFF; // Absolute fallback
+                            }
+                        }
+                        g_acc = nullptr;
+                    }
+                }
+                free(buffer);
+            }
+            else
+            {
+                Serial.println("[Spotify] Not enough RAM to decode album art");
+            }
+        }
+    }
+    http->end();
+    client->stop(); // Ensure TLS session is closed
+    delete http;
+    delete client;
+    return finalColor;
+}
