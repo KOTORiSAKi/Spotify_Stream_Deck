@@ -49,13 +49,14 @@ void HardwareManager::_initButtons()
 
 void HardwareManager::_initMotor()
 {
-    pinMode(PIN_MOTOR_IN2, OUTPUT);
-    digitalWrite(PIN_MOTOR_IN2, LOW);
+    // Swap IN1 and IN2 logic to reverse motor direction
+    pinMode(PIN_MOTOR_IN1, OUTPUT);
+    digitalWrite(PIN_MOTOR_IN1, LOW);
 
     ledcSetup(MOTOR_PWM_CHANNEL, MOTOR_PWM_FREQ, MOTOR_PWM_RES);
-    ledcAttachPin(PIN_MOTOR_IN1, MOTOR_PWM_CHANNEL);
+    ledcAttachPin(PIN_MOTOR_IN2, MOTOR_PWM_CHANNEL);
     ledcWrite(MOTOR_PWM_CHANNEL, 0);
-    Serial.println("[Hardware] DRV8833 Motor initialized (Pins 19, 23)");
+    Serial.println("[Hardware] DRV8833 Motor initialized (Pins 19, 23) - REVERSED");
 }
 
 void HardwareManager::_initEncoder()
@@ -118,7 +119,11 @@ void HardwareManager::setMotorRunning(bool run)
 {
     if (run && !_isScrubbing)
     {
-        ledcWrite(MOTOR_PWM_CHANNEL, 128); // ~30% duty cycle for turntable rotation
+        // Kickstart: overcome physical stiction with a tiny burst of 100% power
+        ledcWrite(MOTOR_PWM_CHANNEL, 255);
+        delay(30);
+        // Then drop to steady duty cycle (77 is ~30%)
+        ledcWrite(MOTOR_PWM_CHANNEL, 77);
     }
     else
     {
@@ -468,6 +473,21 @@ void HardwareManager::update(SpotifyTrack &currentTrack)
 {
     unsigned long now = millis();
 
+    // 0. Sync Motor State with API state (Non-optimistic)
+    static bool _lastIsPlaying = false;
+    static unsigned long _coastingUntil = 0;
+    if (_lastIsPlaying != currentTrack.isPlaying)
+    {
+        _lastIsPlaying = currentTrack.isPlaying;
+        setMotorRunning(currentTrack.isPlaying);
+
+        // If we just paused, ignore encoder ticks for 1000ms so the platter can coast to a stop
+        if (!currentTrack.isPlaying)
+        {
+            _coastingUntil = now + 1000;
+        }
+    }
+
     // 1. Check Button Events with INSTANT visual feedback & FreeRTOS queue dispatch
     ButtonEvent btn = readButtons();
     if (btn == BTN_PREV_PRESSED)
@@ -483,15 +503,11 @@ void HardwareManager::update(SpotifyTrack &currentTrack)
         SoundEffects::playTone(660, 80, 0.7f);
         if (currentTrack.isPlaying)
         {
-            currentTrack.isPlaying = false;
-            setMotorRunning(false);
-            updateDisplay(currentTrack, "[||] Paused");
+            updateDisplay(currentTrack, "[||] Pausing...");
             _postCommand(CMD_PAUSE);
         }
         else
         {
-            currentTrack.isPlaying = true;
-            setMotorRunning(true);
             updateDisplay(currentTrack, "[>] Playing...");
             _postCommand(CMD_PLAY);
         }
@@ -515,7 +531,10 @@ void HardwareManager::update(SpotifyTrack &currentTrack)
         _lastProcessedEncoder = currentEncoderFast;
 
         // If motor is OFF (or we are already scrubbing), any movement is a user scratch!
-        if (!motorShouldBeRunning || _isScrubbing)
+        // EXCEPT if the platter is currently coasting to a stop due to inertia!
+        bool isCoasting = (!motorShouldBeRunning && !_isScrubbing && (now < _coastingUntil));
+
+        if (!isCoasting && (!motorShouldBeRunning || _isScrubbing))
         {
             if (!_isScrubbing)
             {
@@ -541,12 +560,12 @@ void HardwareManager::update(SpotifyTrack &currentTrack)
         }
     }
 
-    // 2.5 Motor Stall/Grab Detection (Checks every 100ms)
+    // 2.5 Motor Stall/Grab Detection (Checks every 250ms)
     static unsigned long _lastStallCheck = 0;
     static unsigned long _motorStartTime = 0;
     static long _lastEncoderForStall = 0;
 
-    if (now - _lastStallCheck >= 100)
+    if (now - _lastStallCheck >= 250)
     {
         _lastStallCheck = now;
         long deltaSlow = currentEncoderFast - _lastEncoderForStall;
@@ -559,11 +578,11 @@ void HardwareManager::update(SpotifyTrack &currentTrack)
                 _motorStartTime = now;
             }
 
-            // Wait 1000ms for motor to overcome inertia and reach target speed
-            if (now - _motorStartTime > 1000)
+            // Wait 1500ms for motor to overcome inertia and reach target speed
+            if (now - _motorStartTime > 1500)
             {
-                // If the platter barely moves over 100ms (delta <= 1), the user has grabbed/stopped it!
-                if (abs(deltaSlow) <= 1)
+                // If the platter barely moves over 250ms (delta <= 2), the user has grabbed/stopped it!
+                if (abs(deltaSlow) <= 2)
                 {
                     if (!_isScrubbing)
                     {

@@ -10,8 +10,8 @@
 #define PIN_ULTRASONIC_ECHO 34 // Changed from 18 to 34 (Input Only pin)
 
 // 3. Push Buttons (Active LOW - Use INPUT_PULLUP)
-#define PIN_BTN_PREV 17
-#define PIN_BTN_PLAY_PAUSE 16
+#define PIN_BTN_PREV 16
+#define PIN_BTN_PLAY_PAUSE 17
 #define PIN_BTN_NEXT 4
 
 // 4. DRV8833 Motor Driver (PWM)
