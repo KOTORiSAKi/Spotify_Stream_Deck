@@ -422,135 +422,135 @@ int JPEGDrawCallback(JPEGDRAW *pDraw)
     return 1;
 }
 
+static uint8_t *g_jpegBuffer = nullptr;
+static WiFiClientSecure *g_imageClient = nullptr;
+static HTTPClient *g_imageHttp = nullptr;
+
 uint32_t SpotifyClient::getAverageAlbumColor(const String &url)
 {
     if (url.length() == 0)
         return 0xFFFFFF; // Default white
 
-    HTTPClient *http = new HTTPClient();
-    WiFiClientSecure *client = new WiFiClientSecure();
-
-    if (!http || !client)
+    // Allocate statically ONCE to completely eliminate heap fragmentation
+    if (!g_jpegBuffer)
     {
-        if (http)
-            delete http;
-        if (client)
-            delete client;
-        return 0xFFFFFF;
+        g_jpegBuffer = (uint8_t *)malloc(40000);
+        g_imageClient = new WiFiClientSecure();
+        if (g_imageClient)
+            g_imageClient->setInsecure();
+        g_imageHttp = new HTTPClient();
+        
+        if (!g_jpegBuffer || !g_imageClient || !g_imageHttp)
+        {
+            Serial.println("[Spotify] Fatal: Could not allocate static image buffers!");
+            return 0xFFFFFF;
+        }
     }
 
-    client->setInsecure();
-
-    http->begin(*client, url);
-    int httpCode = http->GET();
+    g_imageHttp->begin(*g_imageClient, url);
+    int httpCode = g_imageHttp->GET();
     uint32_t finalColor = 0xFFFFFF; // Default white
 
     if (httpCode == HTTP_CODE_OK)
     {
-        int len = http->getSize();
-        if (len > 0 && len < 40000)
-        { // Limit image size to 40KB
-            uint8_t *buffer = (uint8_t *)malloc(len);
-            if (buffer)
+        int len = g_imageHttp->getSize();
+        if (len > 0 && len <= 40000)
+        {
+            WiFiClient *stream = g_imageHttp->getStreamPtr();
+            if (stream)
             {
-                WiFiClient *stream = http->getStreamPtr();
-                if (stream)
+                size_t bytesRead = 0;
+                unsigned long startWait = millis();
+                while (g_imageHttp->connected() && bytesRead < len)
                 {
-                    size_t bytesRead = 0;
-                    unsigned long startWait = millis();
-                    while (http->connected() && bytesRead < len)
+                    size_t available = stream->available();
+                    if (available)
                     {
-                        size_t available = stream->available();
-                        if (available)
+                        size_t toRead = len - bytesRead;
+                        if (available < toRead)
+                            toRead = available;
+                        int c = stream->readBytes(g_jpegBuffer + bytesRead, toRead);
+                        if (c > 0)
                         {
-                            size_t toRead = len - bytesRead;
-                            if (available < toRead)
-                                toRead = available;
-                            int c = stream->readBytes(buffer + bytesRead, toRead);
-                            if (c > 0)
+                            bytesRead += c;
+                            startWait = millis();
+                        }
+                    }
+                    else
+                    {
+                        if (millis() - startWait > 3000)
+                        {
+                            Serial.println("[Spotify] Image download timeout!");
+                            break;
+                        }
+                    }
+                    delay(1);
+                }
+
+                if (bytesRead > 0)
+                {
+                    ColorAccumulator acc;
+                    g_acc = &acc;
+                    JPEGDEC *jpeg = new JPEGDEC();
+                    if (jpeg)
+                    {
+                        if (jpeg->openRAM(g_jpegBuffer, bytesRead, JPEGDrawCallback))
+                        {
+                            jpeg->setPixelType(RGB565_LITTLE_ENDIAN);
+                            jpeg->decode(0, 0, 0); // Decode entire image without scaling
+                        }
+                        delete jpeg;
+
+                        if (acc.count > 0)
+                        {
+                            uint8_t avgR = acc.r / acc.count;
+                            uint8_t avgG = acc.g / acc.count;
+                            uint8_t avgB = acc.b / acc.count;
+
+                            // Boost saturation/brightness to make the color pop on NeoPixels
+                            uint8_t aMax = avgR;
+                            if (avgG > aMax)
+                                aMax = avgG;
+                            if (avgB > aMax)
+                                aMax = avgB;
+
+                            if (aMax > 0 && aMax < 255)
                             {
-                                bytesRead += c;
-                                startWait = millis();
+                                // Scale up so the brightest channel is close to 255
+                                float scale = 255.0f / aMax;
+                                // Soften the scale slightly so it's not overly blown out
+                                scale = 1.0f + (scale - 1.0f) * 0.8f;
+                                avgR = (uint8_t)(avgR * scale > 255 ? 255 : avgR * scale);
+                                avgG = (uint8_t)(avgG * scale > 255 ? 255 : avgG * scale);
+                                avgB = (uint8_t)(avgB * scale > 255 ? 255 : avgB * scale);
                             }
+
+                            finalColor = ((uint32_t)avgR << 16) | ((uint32_t)avgG << 8) | avgB;
+                        }
+                        else if (acc.fallback_count > 0)
+                        {
+                            // If album is grayscale/black & white, fallback to just averaging bright pixels
+                            uint8_t avgR = acc.fallback_r / acc.fallback_count;
+                            uint8_t avgG = acc.fallback_g / acc.fallback_count;
+                            uint8_t avgB = acc.fallback_b / acc.fallback_count;
+                            finalColor = ((uint32_t)avgR << 16) | ((uint32_t)avgG << 8) | avgB;
                         }
                         else
                         {
-                            if (millis() - startWait > 3000)
-                            {
-                                Serial.println("[Spotify] Image download timeout!");
-                                break;
-                            }
+                            finalColor = 0xFFFFFF; // Absolute fallback
                         }
-                        delay(1);
                     }
-
-                    if (bytesRead > 0)
-                    {
-                        ColorAccumulator acc;
-                        g_acc = &acc;
-                        JPEGDEC *jpeg = new JPEGDEC();
-                        if (jpeg)
-                        {
-                            if (jpeg->openRAM(buffer, bytesRead, JPEGDrawCallback))
-                            {
-                                jpeg->setPixelType(RGB565_LITTLE_ENDIAN);
-                                jpeg->decode(0, 0, 0); // Decode entire image without scaling
-                            }
-                            delete jpeg;
-
-                            if (acc.count > 0)
-                            {
-                                uint8_t avgR = acc.r / acc.count;
-                                uint8_t avgG = acc.g / acc.count;
-                                uint8_t avgB = acc.b / acc.count;
-
-                                // Boost saturation/brightness to make the color pop on NeoPixels
-                                uint8_t aMax = avgR;
-                                if (avgG > aMax)
-                                    aMax = avgG;
-                                if (avgB > aMax)
-                                    aMax = avgB;
-
-                                if (aMax > 0 && aMax < 255)
-                                {
-                                    // Scale up so the brightest channel is close to 255
-                                    float scale = 255.0f / aMax;
-                                    // Soften the scale slightly so it's not overly blown out
-                                    scale = 1.0f + (scale - 1.0f) * 0.8f;
-                                    avgR = (uint8_t)(avgR * scale > 255 ? 255 : avgR * scale);
-                                    avgG = (uint8_t)(avgG * scale > 255 ? 255 : avgG * scale);
-                                    avgB = (uint8_t)(avgB * scale > 255 ? 255 : avgB * scale);
-                                }
-
-                                finalColor = ((uint32_t)avgR << 16) | ((uint32_t)avgG << 8) | avgB;
-                            }
-                            else if (acc.fallback_count > 0)
-                            {
-                                // If album is grayscale/black & white, fallback to just averaging bright pixels
-                                uint8_t avgR = acc.fallback_r / acc.fallback_count;
-                                uint8_t avgG = acc.fallback_g / acc.fallback_count;
-                                uint8_t avgB = acc.fallback_b / acc.fallback_count;
-                                finalColor = ((uint32_t)avgR << 16) | ((uint32_t)avgG << 8) | avgB;
-                            }
-                            else
-                            {
-                                finalColor = 0xFFFFFF; // Absolute fallback
-                            }
-                        }
-                        g_acc = nullptr;
-                    }
+                    g_acc = nullptr;
                 }
-                free(buffer);
-            }
-            else
-            {
-                Serial.println("[Spotify] Not enough RAM to decode album art");
             }
         }
+        else
+        {
+            Serial.println("[Spotify] Image too large or invalid length!");
+        }
     }
-    http->end();
-    client->stop(); // Ensure TLS session is closed
-    delete http;
-    delete client;
+    
+    g_imageHttp->end();
     return finalColor;
 }
+
