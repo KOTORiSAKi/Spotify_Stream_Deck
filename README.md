@@ -30,6 +30,36 @@
 
 ---
 
+## ⚙️ การใช้งานฮาร์ดแวร์ MCU เชิงลึก (MCU Hardware Capabilities Used)
+
+โปรเจกต์นี้มีการดึงฟีเจอร์ระดับฮาร์ดแวร์ของไมโครคอนโทรลเลอร์ (ESP32) มาใช้งานอย่างเต็มประสิทธิภาพ โดยเชื่อมโยงกับโมดูลต่างๆ ดังนี้:
+
+1. **Hardware Interrupt (External Interrupt) & IRAM Execution:**
+   - **อุปกรณ์ที่ใช้:** N20 Rotary Encoder
+   - **การทำงาน:** ใช้ External Interrupt ตรวจจับการเปลี่ยนแปลงของสัญญาณ (CHANGE) ที่ขา A เพื่อไม่ให้พลาดจังหวะการหมุนแผ่นเสียงจำลอง (Scrubbing) แม้แต่สเตปเดียว
+   - **เชิงลึก:** ฟังก์ชัน ISR (`handleEncoderISR`) ถูกกำกับด้วย `IRAM_ATTR` เพื่อบังคับให้โหลดโค้ดส่วนนี้ไปทำงานในหน่วยความจำหลัก (RAM) แทนการดึงจาก Flash Memory ทำให้ตอบสนองได้เร็วและเสถียรที่สุด
+2. **High-Resolution Microsecond Timing & GPIO:**
+   - **อุปกรณ์ที่ใช้:** HC-SR04 Ultrasonic Sensor
+   - **การทำงาน:** ใช้ Digital GPIO ควบคุมสถานะขาสัญญาณเพื่อยิง Pulse 10µs เพื่อเริ่มการวัด (Trigger)
+   - **เชิงลึก:** มีการใช้งาน Hardware Timer / CPU Cycle Counter ภายใน ESP32 ผ่านฟังก์ชัน `pulseIn()` เพื่อนับระยะเวลาของสัญญาณคลื่นสะท้อนกลับ (Echo) ในระดับไมโครวินาที (µs) ได้อย่างแม่นยำ
+3. **RMT Peripheral (Remote Control) / Hardware Signal Generation:**
+   - **อุปกรณ์ที่ใช้:** WS2812B NeoPixel Strip
+   - **เชิงลึก:** การส่งข้อมูลไฟ WS2812B ต้องการจังหวะเวลาที่เข้มงวดมาก (800 kHz) โค้ดบน ESP32 จะดึง **RMT Peripheral** (หรือบางสถาปัตยกรรมใช้ I2S/SPI DMA) ซึ่งเป็นฮาร์ดแวร์สร้างสัญญาณดิจิทัลเฉพาะทางมาใช้ส่งข้อมูลแทนการให้ CPU มานั่งหน่วงเวลา (Bit-banging) ทำให้ CPU ว่างไปประมวลผลอย่างอื่นได้เต็มที่
+4. **Hardware PWM (LEDC Peripheral):**
+   - **อุปกรณ์ที่ใช้:** DRV8833 Motor Driver
+   - **การทำงาน:** ใช้ระบบ LEDC (Hardware PWM เฉพาะของ ESP32) ควบคุมการจ่ายไฟ (Duty Cycle) ให้มอเตอร์จานหมุนทำงานที่ความเร็วเป้าหมาย แทนการใช้ `analogWrite()` แบบดั้งเดิม
+5. **I2C Protocol (Fast Mode):**
+   - **อุปกรณ์ที่ใช้:** SSD1306 OLED Display
+   - **การทำงาน:** ใช้งานพอร์ต Hardware I2C (SDA/SCL) โดยตั้งค่า Clock Speed ที่ 400kHz (Fast Mode) เพื่อรีดเฟรมเรตหน้าจอให้ลื่นไหล (~22 FPS) ในการทำแอนิเมชันตัวอักษรวิ่ง (Marquee)
+6. **I2S Protocol (Direct Memory Access Audio):**
+   - **อุปกรณ์ที่ใช้:** MAX98357A I2S Audio DAC
+   - **การทำงาน:** ใช้พอร์ต Hardware I2S ยิงสัญญาณเสียง 16-bit 22050Hz พร้อมระบบ DMA (Direct Memory Access) ส่งข้อมูลเสียงไปที่ DAC โดยตรงโดยไม่กวนเวลาการทำงานหลักของ CPU
+7. **Software Timer (Non-blocking Delay) & RTOS Tick Timer:**
+   - **การทำงานทั่วไป:** หลีกเลี่ยงการใช้คำสั่งบล็อกโปรแกรม โดยใช้ `millis()` (State Machine) เพื่อคุม Frame Rate ข้าม Task (OLED, NeoPixel) และทำ Software Debounce ให้ปุ่มกด (Push Buttons)
+   - ใช้งาน `vTaskDelay` อ้างอิงกับ FreeRTOS Tick Timer สำหรับจัดคิวให้ระบบ Dual-Core รันโค้ดเบื้องหน้าและเบื้องหลังได้อย่างไร้รอยต่อ
+
+---
+
 ## 📌 ผังการต่อพิน (Pinout Reference)
 
 > [!IMPORTANT]
@@ -45,7 +75,7 @@
 | **3** | **Tactile Push Buttons (3 ปุ่ม)** | `PREV: 17`<br>`PLAY/PAUSE: 16`<br>`NEXT: 4` | สวิตช์ปุ่มกดต่อลง GND (ใช้งาน `INPUT_PULLUP` ภายในบอร์ด)                                                                               |
 | **4** | **DRV8833 Motor Driver**          |           `IN1: 19`<br>`IN2: 23`            | IN1 ใช้สัญญาณ PWM (LEDC Channel 0), IN2 ลง GND, VM/VCC ต่อไฟเลี้ยงมอเตอร์                                                              |
 | **5** | **N20 Rotary Encoder**            |             `A: 25`<br>`B: 26`              | ขา A ต่อ Interrupt ตรวจจับการหมุน, ขา B ตรวจจับทิศทาง                                                                                  |
-| **6** | **WS2812B NeoPixel Strip**        |                 `DATA: 13`                  | จำนวน 15 ดวง (DIN ต่อขา 13, 5V ต่อ VIN, GND ร่วม)                                                                                      |
+| **6** | **WS2812B NeoPixel Strip**        |                  `DATA: 2`                  | จำนวน 15 ดวง (DIN ต่อขา 2, 5V ต่อ VIN, GND ร่วม)                                                                                       |
 | **7** | **MAX98357A I2S Audio DAC**       |    `LRC: 27`<br>`BCLK: 32`<br>`DIN: 33`     | **Vin:** ต่อ 5V (VIN), **GND:** ต่อ GND<br>⚠️ **ขา SD:** ต้องต่อเข้าไฟ **3.3V หรือ 5V** เพื่อเปิดใช้งานแอมป์ (ห้ามต่อเข้าช่องขันลำโพง) |
 
 ---
