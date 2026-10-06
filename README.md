@@ -83,6 +83,27 @@
 
 ---
 
+## 📚 ไลบรารีที่ใช้งาน (Dependencies/Libraries)
+
+โปรเจกต์นี้ใช้ไลบรารีภายนอก (External) และไลบรารีพื้นฐานของระบบ (Built-in) ดังนี้:
+
+### External Libraries (ใน `platformio.ini`)
+- **`bblanchon/ArduinoJson`** - สำหรับจัดการและดึงข้อมูลจาก JSON Response ของ Spotify API
+- **`adafruit/Adafruit SSD1306`** - สำหรับควบคุมและแสดงผลบนหน้าจอ OLED
+- **`adafruit/Adafruit GFX Library`** - เป็น Core Library สำหรับวาดกราฟิก รูปทรง และตัวอักษร
+- **`adafruit/Adafruit NeoPixel`** - สำหรับควบคุมสีและการกะพริบของหลอดไฟแอลอีดี WS2812B
+- **`bitbank2/JPEGDEC`** - สำหรับถอดรหัสรูปภาพ JPEG (ใช้ประมวลผลปกอัลบั้มเพื่อดึงค่าสี)
+
+### ESP32 / Arduino Built-in Libraries
+- **`WiFi`, `HTTPClient`, `WiFiClientSecure`** - จัดการการเชื่อมต่ออินเทอร์เน็ตและการขอข้อมูลผ่าน HTTPS
+- **`Wire`** - โปรโตคอล I2C สำหรับการสื่อสารกับจอ OLED
+- **`SPI`** - โปรโตคอลพื้นฐานของระบบฮาร์ดแวร์
+- **`freertos/FreeRTOS.h`** - สำหรับรันระบบปฏิบัติการจิ๋ว (RTOS) แบบ Dual-core (Tasks, Queues)
+- **`driver/i2s.h`** - จัดการฮาร์ดแวร์ I2S เพื่อส่งสัญญาณเสียงออกไปยังบอร์ด DAC 
+- **`driver/ledc.h`** - ควบคุมสัญญาณ PWM ด้วยตัวประมวลผลฮาร์ดแวร์ (ใช้ควบคุมความเร็วมอเตอร์)
+
+---
+
 ## 🛠️ โครงสร้างโปรเจกต์ (Project Structure)
 
 ```
